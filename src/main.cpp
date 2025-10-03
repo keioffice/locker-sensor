@@ -45,9 +45,9 @@ const Config DEFAULT_CONFIG = {
     1883,                    // MQTT Port
     "ESP32_Locker_1",              // MQTT Client ID
     "locker/sensor",                      // MQTT Topic
-    400,                     // 検知距離 300mm
+    400,                     // 検知距離 400mm
     10,                      // 預かり判定 10秒
-    0                        // 取り出し判定 0秒(即時)
+    10                       // 取り出し判定 10秒
 };
 
 // グローバル設定
@@ -67,8 +67,14 @@ WebServer server(80);
 bool isOccupied = false;
 bool lastOccupiedState = false;  // 前回の預かり状態
 unsigned long detectionStartTime = 0;
+unsigned long pickupStartTime = 0;  // 取り出し検知開始時刻
 unsigned long lastSendTime = 0;
 int currentDistance = 0;
+
+// 移動平均フィルター用
+const int FILTER_SIZE = 5;  // 5回の平均を取る
+int distanceBuffer[FILTER_SIZE] = {9999, 9999, 9999, 9999, 9999};
+int bufferIndex = 0;
 
 // 関数プロトタイプ
 void connectWiFi();
@@ -198,16 +204,18 @@ void loop() {
     // RangeStatusが0,1,2の場合は測定値を使用（4=範囲外のみ除外）
     // 0: 正常, 1: シグマエラー（精度低いが使用可）, 2: 信号エラー（弱い信号だが使用可）
     // 4: 範囲外, 5: ハードウェアエラー
+    int rawDistance = 9999;  // 生の測定値
+
     if (measure.RangeStatus != 4 && measure.RangeStatus != 5) {  // 範囲外とHWエラー以外は使用
-        currentDistance = measure.RangeMilliMeter;
+        rawDistance = measure.RangeMilliMeter;
 
         // エラー値のチェック
-        if (currentDistance == ERROR_DISTANCE) {
-            currentDistance = 9999;  // 範囲外として扱う
+        if (rawDistance == ERROR_DISTANCE) {
+            rawDistance = 9999;  // 範囲外として扱う
         }
     } else {
         // 測定エラー（範囲外またはハードウェアエラー）
-        currentDistance = 9999;
+        rawDistance = 9999;
         static unsigned long lastErrorTime = 0;
         if (millis() - lastErrorTime > 1000) {
             Serial.print("測定エラー - RangeStatus: ");
@@ -222,6 +230,17 @@ void loop() {
             lastErrorTime = millis();
         }
     }
+
+    // 移動平均フィルター処理
+    distanceBuffer[bufferIndex] = rawDistance;
+    bufferIndex = (bufferIndex + 1) % FILTER_SIZE;
+
+    // 平均値を計算
+    long sum = 0;
+    for (int i = 0; i < FILTER_SIZE; i++) {
+        sum += distanceBuffer[i];
+    }
+    currentDistance = sum / FILTER_SIZE;
 
     // デバッグ出力（1秒ごと）
     static unsigned long lastDebugTime = 0;
@@ -243,58 +262,61 @@ void loop() {
 
     // 物体検知処理
     if (currentDistance <= config.detection_distance) {
-        // 物体検知開始または継続
-        if (detectionStartTime == 0) {
-            detectionStartTime = millis();
-            Serial.println("物体検知開始！");
-        }
+        // 物体が検知距離内にある
 
-        // 設定秒数以上継続したら預かり状態に
-        if (!isOccupied && (millis() - detectionStartTime >= config.deposit_duration * 1000)) {
-            isOccupied = true;
-            lastOccupiedState = true;
-            Serial.println("=================================");
-            Serial.println("荷物預かり開始！");
-            Serial.println("occupied: true に変更");
-            Serial.println("=================================");
-            sendStatus();  // 預かり状態をMQTT送信（状態変化時）
-            lastSendTime = millis();  // 送信時刻を更新
+        if (isOccupied && pickupStartTime > 0) {
+            // 預かり状態で取り出し検知中に物体が戻った
+            Serial.println("取り出しキャンセル（荷物が戻りました）");
+            pickupStartTime = 0;  // 取り出し検知をキャンセル
+        } else if (!isOccupied) {
+            // 預かり前の検知処理
+            if (detectionStartTime == 0) {
+                detectionStartTime = millis();
+                Serial.println("物体検知開始！");
+            }
+
+            // 設定秒数以上継続したら預かり状態に
+            if (millis() - detectionStartTime >= config.deposit_duration * 1000) {
+                isOccupied = true;
+                lastOccupiedState = true;
+                Serial.println("=================================");
+                Serial.println("荷物預かり開始！");
+                Serial.println("occupied: true に変更");
+                Serial.println("=================================");
+                sendStatus();  // 預かり状態をMQTT送信（状態変化時）
+                lastSendTime = millis();  // 送信時刻を更新
+            }
         }
     } else {
-        // 物体が離れた
-        if (detectionStartTime > 0) {
-            if (isOccupied) {
-                // 預かり中の荷物が取り出された
-                // 取り出し判定時間が0なら即時、それ以外は待機
-                if (config.pickup_duration == 0) {
-                    Serial.println("=================================");
-                    Serial.println("荷物取り出し完了！");
-                    Serial.println("occupied: false に変更");
-                    Serial.println("=================================");
-                    isOccupied = false;
-                    lastOccupiedState = false;
-                    sendStatus();  // 取り出し状態をMQTT送信（状態変化時）
-                    lastSendTime = millis();  // 送信時刻を更新
-                    detectionStartTime = 0;
-                } else {
-                    // 取り出し判定時間の実装（将来的に拡張可能）
-                    Serial.println("=================================");
-                    Serial.println("荷物取り出し完了！");
-                    Serial.println("occupied: false に変更");
-                    Serial.println("=================================");
-                    isOccupied = false;
-                    lastOccupiedState = false;
-                    sendStatus();  // 取り出し状態をMQTT送信（状態変化時）
-                    lastSendTime = millis();  // 送信時刻を更新
-                    detectionStartTime = 0;
-                }
-            } else {
-                // 設定秒数未満でキャンセル
-                Serial.print("検知キャンセル（");
-                Serial.print(config.deposit_duration);
-                Serial.println("秒未満）");
-                detectionStartTime = 0;
+        // 物体が検知距離から離れた
+
+        if (isOccupied) {
+            // 預かり中の荷物が取り出された
+            if (pickupStartTime == 0) {
+                // 取り出し検知開始
+                pickupStartTime = millis();
+                Serial.println("荷物取り出し検知開始...");
             }
+
+            // 取り出し判定時間が経過したら取り出し完了
+            if (millis() - pickupStartTime >= config.pickup_duration * 1000) {
+                Serial.println("=================================");
+                Serial.println("荷物取り出し完了！");
+                Serial.println("occupied: false に変更");
+                Serial.println("=================================");
+                isOccupied = false;
+                lastOccupiedState = false;
+                sendStatus();  // 取り出し状態をMQTT送信（状態変化時）
+                lastSendTime = millis();  // 送信時刻を更新
+                detectionStartTime = 0;
+                pickupStartTime = 0;
+            }
+        } else if (detectionStartTime > 0) {
+            // 預かり前の検知がキャンセルされた
+            Serial.print("検知キャンセル（");
+            Serial.print(config.deposit_duration);
+            Serial.println("秒未満）");
+            detectionStartTime = 0;
         }
     }
 
@@ -429,22 +451,32 @@ void updateLEDs() {
             blinkState = !blinkState;
             lastBlink = millis();
         }
+    } else if (isOccupied && pickupStartTime > 0) {
+        // 預かり状態で取り出し検知中：赤LED 1秒間隔で点滅
+        static unsigned long lastBlink = 0;
+        static bool blinkState = false;
+        if (millis() - lastBlink > 1000) {
+            digitalWrite(RED_LED_PIN, blinkState);
+            blinkState = !blinkState;
+            lastBlink = millis();
+        }
+        digitalWrite(GREEN_LED_PIN, LOW);
     } else if (isOccupied) {
-        // 預かり中：赤LED点灯
+        // 預かり状態（取り出し検知前）：赤LED点灯
         digitalWrite(RED_LED_PIN, HIGH);
         digitalWrite(GREEN_LED_PIN, LOW);
     } else if (detectionStartTime > 0) {
-        // 検知中：緑LED点滅
+        // 検知中：緑LED 1秒間隔で点滅
         static unsigned long lastBlink = 0;
         static bool blinkState = false;
-        if (millis() - lastBlink > 200) {
+        if (millis() - lastBlink > 1000) {
             digitalWrite(GREEN_LED_PIN, blinkState);
             blinkState = !blinkState;
             lastBlink = millis();
         }
         digitalWrite(RED_LED_PIN, LOW);
     } else {
-        // 空き：緑LED点灯
+        // 空き状態：緑LED点灯
         digitalWrite(RED_LED_PIN, LOW);
         digitalWrite(GREEN_LED_PIN, HIGH);
     }

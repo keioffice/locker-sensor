@@ -12,8 +12,8 @@
 #define EEPROM_MAGIC 0xABCD  // 設定が有効かチェックする魔法の数値
 
 // ピン定義
-const int RED_LED_PIN = 32;
-const int GREEN_LED_PIN = 33;
+const int RED_LED_PIN = 33;
+const int GREEN_LED_PIN = 32;
 const int INIT_PIN = 0;  // GPIO0: 初期化ピン
 
 // 設定構造体
@@ -109,8 +109,8 @@ void setup() {
     // EEPROM初期化
     EEPROM.begin(EEPROM_SIZE);
 
-    // GPIO0チェック: High=初期化、Low=通常起動
-    if (digitalRead(INIT_PIN) == HIGH) {
+    // GPIO0チェック: Low=初期化（GND接続時）、High=通常起動
+    if (digitalRead(INIT_PIN) == LOW) {
         Serial.println("*** 初期化モード: 設定をデフォルト値にリセット ***");
         resetConfig();
 

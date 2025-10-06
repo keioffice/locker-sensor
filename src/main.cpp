@@ -14,13 +14,14 @@
 // ピン定義
 const int RED_LED_PIN = 33;
 const int GREEN_LED_PIN = 32;
-const int INIT_PIN = 0;  // GPIO0: 初期化ピン
+const int INIT_PIN = 4;  // GPIO4: 初期化ピン
 
 // 設定構造体
 struct Config {
     uint16_t magic;  // 設定の有効性を確認
     char wifi_ssid[32];
     char wifi_pass[64];
+    bool use_dhcp;    // true=DHCP, false=固定IP
     uint8_t ip_addr[4];
     uint8_t gateway[4];
     uint8_t subnet[4];
@@ -38,14 +39,15 @@ const Config DEFAULT_CONFIG = {
     EEPROM_MAGIC,
     "TP-Link_2G",
     "5e0f624603e22",
-    {192, 168, 0, 210},      // IP
-    {192, 168, 0, 1},    // Gateway
+    false,                   // DHCP無効（固定IP使用）
+    {192, 168, 0, 252},      // IP
+    {192, 168, 0, 1},        // Gateway
     {255, 255, 255, 0},      // Subnet
-    "192.168.0.251",           // MQTT Broker
+    "192.168.0.251",         // MQTT Broker
     1883,                    // MQTT Port
-    "ESP32_Locker_1",              // MQTT Client ID
-    "locker/sensor",                      // MQTT Topic
-    400,                     // 検知距離 400mm
+    "ESP32_Locker_1",        // MQTT Client ID
+    "locker/sensor",         // MQTT Topic
+    100,                     // 検知距離 400mm
     10,                      // 預かり判定 10秒
     10                       // 取り出し判定 10秒
 };
@@ -109,7 +111,7 @@ void setup() {
     // EEPROM初期化
     EEPROM.begin(EEPROM_SIZE);
 
-    // GPIO0チェック: Low=初期化（GND接続時）、High=通常起動
+    // GPIO4チェック: Low=初期化（GND接続時）、High=通常起動
     if (digitalRead(INIT_PIN) == LOW) {
         Serial.println("*** 初期化モード: 設定をデフォルト値にリセット ***");
         resetConfig();
@@ -336,13 +338,20 @@ void connectWiFi() {
     Serial.print("WiFi接続中: ");
     Serial.println(config.wifi_ssid);
 
-    // 固定IP設定
-    IPAddress local_IP(config.ip_addr[0], config.ip_addr[1], config.ip_addr[2], config.ip_addr[3]);
-    IPAddress gateway(config.gateway[0], config.gateway[1], config.gateway[2], config.gateway[3]);
-    IPAddress subnet(config.subnet[0], config.subnet[1], config.subnet[2], config.subnet[3]);
+    if (config.use_dhcp) {
+        // DHCPモード
+        Serial.println("IPアドレス取得方法: DHCP");
+        WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);  // DHCP有効化
+    } else {
+        // 固定IPモード
+        Serial.println("IPアドレス取得方法: 固定IP");
+        IPAddress local_IP(config.ip_addr[0], config.ip_addr[1], config.ip_addr[2], config.ip_addr[3]);
+        IPAddress gateway(config.gateway[0], config.gateway[1], config.gateway[2], config.gateway[3]);
+        IPAddress subnet(config.subnet[0], config.subnet[1], config.subnet[2], config.subnet[3]);
 
-    if (!WiFi.config(local_IP, gateway, subnet)) {
-        Serial.println("固定IP設定失敗！");
+        if (!WiFi.config(local_IP, gateway, subnet)) {
+            Serial.println("固定IP設定失敗！");
+        }
     }
 
     WiFi.begin(config.wifi_ssid, config.wifi_pass);
@@ -452,10 +461,10 @@ void updateLEDs() {
             lastBlink = millis();
         }
     } else if (isOccupied && pickupStartTime > 0) {
-        // 預かり状態で取り出し検知中：赤LED 1秒間隔で点滅
+        // 預かり状態で取り出し検知中：赤LED 0.5秒間隔で点滅
         static unsigned long lastBlink = 0;
         static bool blinkState = false;
-        if (millis() - lastBlink > 1000) {
+        if (millis() - lastBlink > 500) {
             digitalWrite(RED_LED_PIN, blinkState);
             blinkState = !blinkState;
             lastBlink = millis();
@@ -466,10 +475,10 @@ void updateLEDs() {
         digitalWrite(RED_LED_PIN, HIGH);
         digitalWrite(GREEN_LED_PIN, LOW);
     } else if (detectionStartTime > 0) {
-        // 検知中：緑LED 1秒間隔で点滅
+        // 検知中：緑LED 0.5秒間隔で点滅
         static unsigned long lastBlink = 0;
         static bool blinkState = false;
-        if (millis() - lastBlink > 1000) {
+        if (millis() - lastBlink > 500) {
             digitalWrite(GREEN_LED_PIN, blinkState);
             blinkState = !blinkState;
             lastBlink = millis();
@@ -537,7 +546,23 @@ void handleRoot() {
     html += "button { background: #4CAF50; color: white; padding: 12px 30px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; width: 100%; margin-top: 20px; }";
     html += "button:hover { background: #45a049; }";
     html += ".container { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }";
-    html += "</style></head><body>";
+    html += "input[type='radio'] { margin-right: 5px; }";
+    html += ".radio-group { display: flex; gap: 20px; margin: 10px 0; }";
+    html += ".ip-settings.disabled { opacity: 0.5; pointer-events: none; }";
+    html += "</style>";
+    html += "<script>";
+    html += "function toggleIPSettings() {";
+    html += "  var useDHCP = document.querySelector('input[name=\"ip_mode\"]:checked').value === 'dhcp';";
+    html += "  var ipSettings = document.getElementById('ip_settings');";
+    html += "  if (useDHCP) {";
+    html += "    ipSettings.classList.add('disabled');";
+    html += "    document.querySelectorAll('#ip_settings input').forEach(function(input) { input.removeAttribute('required'); });";
+    html += "  } else {";
+    html += "    ipSettings.classList.remove('disabled');";
+    html += "    document.querySelectorAll('#ip_settings input').forEach(function(input) { input.setAttribute('required', 'required'); });";
+    html += "  }";
+    html += "}";
+    html += "</script></head><body>";
     html += "<div class='container'>";
     html += "<h1>ESP32 ロッカーセンサー設定</h1>";
     html += "<form method='POST' action='/save'>";
@@ -547,22 +572,31 @@ void handleRoot() {
     html += "<input type='text' name='wifi_ssid' value='" + String(config.wifi_ssid) + "' required></div>";
     html += "<div class='form-group'><label>WiFi パスワード:</label>";
     html += "<input type='password' name='wifi_pass' value='" + String(config.wifi_pass) + "'></div>";
+
+    html += "<div class='form-group'><label>IPアドレス取得方法:</label>";
+    html += "<div class='radio-group'>";
+    html += "<label><input type='radio' name='ip_mode' value='dhcp' onchange='toggleIPSettings()' " + String(config.use_dhcp ? "checked" : "") + ">DHCP</label>";
+    html += "<label><input type='radio' name='ip_mode' value='static' onchange='toggleIPSettings()' " + String(!config.use_dhcp ? "checked" : "") + ">固定IP</label>";
+    html += "</div></div>";
+
+    html += "<div id='ip_settings' class='" + String(config.use_dhcp ? "ip-settings disabled" : "ip-settings") + "'>";
     html += "<div class='form-group'><label>IPアドレス:</label>";
     html += "<input type='text' name='ip_addr' value='";
     html += String(config.ip_addr[0]) + "." + String(config.ip_addr[1]) + "." + String(config.ip_addr[2]) + "." + String(config.ip_addr[3]);
-    html += "' required></div>";
+    html += "' " + String(!config.use_dhcp ? "required" : "") + "></div>";
     html += "<div class='form-group'><label>ゲートウェイ:</label>";
     html += "<input type='text' name='gateway' value='";
     html += String(config.gateway[0]) + "." + String(config.gateway[1]) + "." + String(config.gateway[2]) + "." + String(config.gateway[3]);
-    html += "' required></div>";
+    html += "' " + String(!config.use_dhcp ? "required" : "") + "></div>";
     html += "<div class='form-group'><label>サブネットマスク:</label>";
     html += "<input type='text' name='subnet' value='";
     html += String(config.subnet[0]) + "." + String(config.subnet[1]) + "." + String(config.subnet[2]) + "." + String(config.subnet[3]);
-    html += "' required></div>";
+    html += "' " + String(!config.use_dhcp ? "required" : "") + "></div>";
+    html += "</div>";
 
     html += "<h2>MQTT設定</h2>";
-    html += "<div class='form-group'><label>MQTTブローカー:</label>";
-    html += "<input type='text' name='mqtt_broker' value='" + String(config.mqtt_broker) + "' required></div>";
+    html += "<div class='form-group'><label>MQTTブローカー (IPアドレスまたはURL):</label>";
+    html += "<input type='text' name='mqtt_broker' value='" + String(config.mqtt_broker) + "' placeholder='192.168.0.251 または mqtt.example.com' required></div>";
     html += "<div class='form-group'><label>MQTTポート:</label>";
     html += "<input type='number' name='mqtt_port' value='" + String(config.mqtt_port) + "' required></div>";
     html += "<div class='form-group'><label>MQTTクライアントID:</label>";
@@ -585,18 +619,23 @@ void handleRoot() {
 }
 
 void handleSave() {
-    // IPアドレスのパース
-    String ip_str = server.arg("ip_addr");
-    sscanf(ip_str.c_str(), "%hhu.%hhu.%hhu.%hhu",
-           &config.ip_addr[0], &config.ip_addr[1], &config.ip_addr[2], &config.ip_addr[3]);
+    // IPモード設定
+    config.use_dhcp = (server.arg("ip_mode") == "dhcp");
 
-    String gw_str = server.arg("gateway");
-    sscanf(gw_str.c_str(), "%hhu.%hhu.%hhu.%hhu",
-           &config.gateway[0], &config.gateway[1], &config.gateway[2], &config.gateway[3]);
+    // IPアドレスのパース（固定IPの場合のみ）
+    if (!config.use_dhcp) {
+        String ip_str = server.arg("ip_addr");
+        sscanf(ip_str.c_str(), "%hhu.%hhu.%hhu.%hhu",
+               &config.ip_addr[0], &config.ip_addr[1], &config.ip_addr[2], &config.ip_addr[3]);
 
-    String sn_str = server.arg("subnet");
-    sscanf(sn_str.c_str(), "%hhu.%hhu.%hhu.%hhu",
-           &config.subnet[0], &config.subnet[1], &config.subnet[2], &config.subnet[3]);
+        String gw_str = server.arg("gateway");
+        sscanf(gw_str.c_str(), "%hhu.%hhu.%hhu.%hhu",
+               &config.gateway[0], &config.gateway[1], &config.gateway[2], &config.gateway[3]);
+
+        String sn_str = server.arg("subnet");
+        sscanf(sn_str.c_str(), "%hhu.%hhu.%hhu.%hhu",
+               &config.subnet[0], &config.subnet[1], &config.subnet[2], &config.subnet[3]);
+    }
 
     // 文字列設定
     strncpy(config.wifi_ssid, server.arg("wifi_ssid").c_str(), sizeof(config.wifi_ssid) - 1);

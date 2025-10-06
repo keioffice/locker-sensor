@@ -47,7 +47,7 @@ const Config DEFAULT_CONFIG = {
     1883,                    // MQTT Port
     "ESP32_Locker_1",        // MQTT Client ID
     "locker/sensor",         // MQTT Topic
-    100,                     // 検知距離 400mm
+    100,                     // 検知距離 100mm
     10,                      // 預かり判定 10秒
     10                       // 取り出し判定 10秒
 };
